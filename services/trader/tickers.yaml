@@ -1,0 +1,14 @@
+# Alert symbol (TradingView) -> HyperLiquid coin name.
+# Coins are resolved against the live HL universe on startup.
+# Inactive if the coin is not listed on the configured network.
+tickers:
+  - alert: SOLUSDT.P
+    coin: SOL
+  - alert: BTCUSDT.P
+    coin: BTC
+  - alert: ETHUSDT.P
+    coin: ETH
+  - alert: TSLAUSDT.P
+    coin: TSLA
+  - alert: TSLA
+    coin: TSLA

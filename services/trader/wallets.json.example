@@ -1,0 +1,9 @@
+{
+  "main": {
+    "private_key": "0xYOUR_EVM_PRIVATE_KEY",
+    "account_address": "",
+    "leverage": 2.0,
+    "collateral_percentage": 10.0,
+    "description": "Primary trading wallet (prefer an agent wallet)"
+  }
+}
