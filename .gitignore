@@ -1,0 +1,15 @@
+.env
+wallets.json
+logs/
+data/
+chrome-profile/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.pid
+.DS_Store

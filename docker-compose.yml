@@ -1,0 +1,55 @@
+services:
+  trader:
+    build:
+      context: ./services/trader
+    container_name: traderbot-trader
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TRADER_PORT: "8080"
+      DATA_DIR: /app/data
+      LOG_DIR: /app/logs
+      WALLETS_FILE: /app/wallets.json
+      TICKERS_FILE: /app/tickers.yaml
+    volumes:
+      - ./services/trader/wallets.json:/app/wallets.json:ro
+      - ./services/trader/tickers.yaml:/app/tickers.yaml:ro
+      - ./data/trader:/app/data
+      - ./logs/trader:/app/logs
+    ports:
+      - "18080:8080"
+    networks:
+      - traderbot
+
+  watcher:
+    build:
+      context: ./services/watcher
+    container_name: traderbot-watcher
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      WATCHER_PORT: "8090"
+      DISPLAY: ":99"
+      DATA_DIR: /app/data
+      LOG_DIR: /app/logs
+      CHROME_PROFILE_DIR: /app/chrome-profile
+      TRADER_DO_TRADE_URL: http://trader:8080/do_trade
+      TRADER_TREND_URL: http://trader:8080/trend
+    volumes:
+      - ./data/watcher:/app/data
+      - ./logs/watcher:/app/logs
+      - ./chrome-profile:/app/chrome-profile
+    ports:
+      - "18090:8090"
+      - "15900:5900"
+    depends_on:
+      - trader
+    shm_size: "2gb"
+    networks:
+      - traderbot
+
+networks:
+  traderbot:
+    driver: bridge
