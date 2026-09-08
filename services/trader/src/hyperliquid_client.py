@@ -166,9 +166,11 @@ def trading_account_value(
 
 
 def collect_universe(info: Info, wanted_coins: set[str] | None = None) -> list[dict[str, Any]]:
-    """Collect the default perp universe plus any HIP-3 coins we explicitly want.
+    """Collect the default perp universe plus HIP-3 coins we explicitly want.
 
-    Do not walk every builder dex — testnet can expose hundreds and hang startup.
+    HIP-3 names (xyz:TSLA) are not in the core meta() or all_mids() catalogs.
+    Probe preferred builder dexes first, then a short prefix of perpDexs — do not
+    walk every testnet dex.
     """
     assets: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -180,12 +182,15 @@ def collect_universe(info: Info, wanted_coins: set[str] | None = None) -> list[d
                 seen.add(name)
                 assets.append(item)
 
+    def shorts() -> set[str]:
+        names = {str(item.get("name", "")).upper() for item in assets}
+        names.update(name.split(":")[-1] for name in list(names))
+        return names
+
     add_meta(info.meta())
 
     wanted = {coin.upper() for coin in (wanted_coins or set())}
-    found = {str(item.get("name", "")).upper() for item in assets}
-    found.update(name.split(":")[-1].upper() for name in found)
-    missing = wanted - found
+    missing = wanted - shorts()
     if not missing:
         return assets
 
@@ -193,20 +198,19 @@ def collect_universe(info: Info, wanted_coins: set[str] | None = None) -> list[d
         mids = info.all_mids() or {}
     except Exception as exc:
         logger.debug("all_mids() unavailable: %s", exc)
-        return assets
+        mids = {}
 
     extra_dexes: set[str] = set()
     for name in mids:
         short = name.split(":")[-1].upper()
-        if short in missing and ":" in name:
+        if short not in missing:
+            continue
+        if ":" in name:
             extra_dexes.add(name.split(":", 1)[0])
+        if name not in seen:
             assets.append({"name": name, "szDecimals": 0})
             seen.add(name)
-            missing.discard(short)
-        elif short in missing:
-            assets.append({"name": name, "szDecimals": 0})
-            seen.add(name)
-            missing.discard(short)
+        missing.discard(short)
 
     for dex in extra_dexes:
         try:
@@ -214,7 +218,44 @@ def collect_universe(info: Info, wanted_coins: set[str] | None = None) -> list[d
         except Exception as exc:
             logger.debug("Could not load meta for dex %s: %s", dex, exc)
 
+    missing = wanted - shorts()
+    if not missing:
+        return assets
+
+    dex_names = _perp_dex_names(info)
+    preferred = [name for name in ("xyz", "flx") if name in dex_names]
+    rest = [name for name in dex_names if name not in preferred]
+    probed = 0
+    for dex in preferred + rest:
+        if not missing:
+            break
+        if probed >= 20:
+            logger.warning("Stopped HIP-3 scan after %s dexes; still missing %s", probed, sorted(missing))
+            break
+        try:
+            add_meta(info.meta(dex=dex))
+        except Exception as exc:
+            logger.debug("Could not load meta for dex %s: %s", dex, exc)
+            continue
+        probed += 1
+        missing = wanted - shorts()
+
+    if missing:
+        logger.warning("HIP-3 coins still missing after dex scan: %s", sorted(missing))
     return assets
+
+
+def _perp_dex_names(info: Info) -> list[str]:
+    try:
+        raw = info.perp_dexs() or []
+    except Exception as exc:
+        logger.debug("perp_dexs() unavailable: %s", exc)
+        return []
+    names: list[str] = []
+    for item in raw:
+        if isinstance(item, dict) and item.get("name"):
+            names.append(str(item["name"]))
+    return names
 
 
 class HyperliquidWallet:
@@ -259,10 +300,20 @@ class HyperliquidWallet:
         return "default"
 
     def mid_price(self, coin: str) -> float:
-        mids = self.info.all_mids()
+        mids = self._mids_lookup(coin)
         if coin not in mids:
             raise ValueError(f"No mid price for {coin}")
         return float(mids[coin])
+
+    def _mids_lookup(self, coin: str | None = None) -> dict[str, Any]:
+        mids = dict(self.info.all_mids() or {})
+        if coin and coin not in mids and ":" in coin:
+            dex = coin.split(":", 1)[0]
+            try:
+                mids.update(self.info.all_mids(dex=dex) or {})
+            except Exception as exc:
+                logger.debug("all_mids(dex=%s) unavailable: %s", dex, exc)
+        return mids
 
     def position_size(self, coin: str) -> float:
         state = self.user_state()
@@ -295,7 +346,12 @@ class HyperliquidWallet:
             coin = pos.get("coin")
             mark = mids.get(str(coin))
             if mark is None and coin:
-                mark = mids.get(str(coin).split(":")[-1])
+                try:
+                    extra = self._mids_lookup(str(coin))
+                    raw = extra.get(str(coin)) or extra.get(str(coin).split(":")[-1])
+                    mark = float(raw) if raw not in (None, "") else None
+                except (TypeError, ValueError):
+                    mark = mids.get(str(coin).split(":")[-1])
             entry = pos.get("entryPx")
             pnl = pos.get("unrealizedPnl")
             positions.append(

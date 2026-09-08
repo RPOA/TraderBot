@@ -27,6 +27,25 @@ tickers:
     assert tsla.resolved_coin == "xyz:TSLA"
 
 
+def test_prefers_live_xyz_over_delisted_clone(tmp_path: Path):
+    path = tmp_path / "tickers.yaml"
+    path.write_text(
+        """
+tickers:
+  - alert: TSLA
+    coin: TSLA
+"""
+    )
+    registry = TickerRegistry(path)
+    registry.activate_from_universe(
+        [
+            {"name": "flx:TSLA", "szDecimals": 2, "isDelisted": True},
+            {"name": "xyz:TSLA", "szDecimals": 3},
+        ]
+    )
+    assert registry.resolve("TSLA").resolved_coin == "xyz:TSLA"
+
+
 def test_inactive_when_missing(tmp_path: Path):
     path = tmp_path / "tickers.yaml"
     path.write_text(

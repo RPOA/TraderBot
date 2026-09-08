@@ -12,6 +12,20 @@ import yaml
 logger = logging.getLogger("trader")
 
 
+def _prefer_asset(current: dict[str, Any] | None, candidate: dict[str, Any]) -> dict[str, Any]:
+    """Prefer a live TradeXYZ listing over delisted HIP-3 clones."""
+    if current is None:
+        return candidate
+    return candidate if _asset_rank(candidate) < _asset_rank(current) else current
+
+
+def _asset_rank(asset: dict[str, Any]) -> tuple[int, int]:
+    name = str(asset.get("name", ""))
+    delisted = 1 if asset.get("isDelisted") else 0
+    preferred_dex = 0 if name.startswith("xyz:") else 1
+    return (delisted, preferred_dex)
+
+
 @dataclass
 class Ticker:
     alert: str
@@ -57,9 +71,9 @@ class TickerRegistry:
             name = str(asset.get("name", ""))
             if not name:
                 continue
-            by_name[name.upper()] = asset
+            by_name[name.upper()] = _prefer_asset(by_name.get(name.upper()), asset)
             short = name.split(":")[-1].upper()
-            by_name.setdefault(short, asset)
+            by_name[short] = _prefer_asset(by_name.get(short), asset)
 
         for ticker in self.tickers.values():
             asset = by_name.get(ticker.coin.upper())
