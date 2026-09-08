@@ -257,13 +257,13 @@ async def handle_wallet(request: web.Request) -> web.Response:
         snapshots = []
         for wid, wallet in broker.wallets.items():
             try:
-                snapshots.append(wallet.wallet_snapshot())
+                snapshots.append(await asyncio.to_thread(wallet.wallet_snapshot))
             except Exception as exc:
                 snapshots.append({"wallet_id": wid, "error": str(exc)})
         return web.json_response({"wallets": snapshots})
     try:
         wallet = broker.get_wallet(wallet_id)
-        return web.json_response(wallet.wallet_snapshot())
+        return web.json_response(await asyncio.to_thread(wallet.wallet_snapshot))
     except Exception as exc:
         return _json_error(str(exc), 400)
 

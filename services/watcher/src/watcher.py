@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from . import config
-from .health_monitor import TAB_WATCHER, HealthMonitor, HealthStatus, merge_health
+from .health_monitor import HealthMonitor, HealthStatus, merge_health
 from .logutil import short_exc
 from .order_tracker import OrderTracker
 from .tradingview import backup_chrome_profile, create_chrome_driver, get_active_alerts, is_logged_in, open_alerts_panel
@@ -102,7 +102,6 @@ class AlertWatcher:
             self.driver = create_chrome_driver()
             self.driver.get(config.TRADINGVIEW_URL)
             time.sleep(5)
-            self.driver.execute_script("window.name = arguments[0];", TAB_WATCHER)
             self.logged_in = is_logged_in(self.driver)
             if not self.logged_in:
                 logger.error("TradingView login required via VNC (port 5900). reCAPTCHA blocks automated login.")
@@ -254,7 +253,10 @@ class AlertWatcher:
             logger.warning("Alert scan skipped: driver busy")
             return []
         try:
-            self._pin_watcher_tab()
+            if self.health_monitor and self.health_monitor.main_window_handle:
+                handle = self.health_monitor.main_window_handle
+                if self.driver.current_window_handle != handle:
+                    self.driver.switch_to.window(handle)
             if not open_alerts_panel(self.driver):
                 self._set_scrape_issue("Alerts panel not opened on watcher tab")
                 return []

@@ -45,7 +45,7 @@ class FakeDriver:
         self.switch_to = FakeSwitchTo(self)
         self.titles: list[str] = []
 
-    def execute_script(self, script):
+    def execute_script(self, script, *args):
         if "window.open" in script:
             if "health" not in self.window_handles:
                 self.window_handles.append("health")
@@ -113,8 +113,9 @@ def test_health_monitor_passes_when_controllers_exist():
     status = _monitor(_healthy_driver()).check_elements()
     assert status.is_healthy is True
     assert status.issues == []
-    assert status.controllers["alerts_button"]["ok"] is True
-    assert status.controllers["alerts_container"]["ok"] is True
+    assert status.controllers["SELECTOR_ALERTS_BUTTON"]["ok"] is True
+    assert status.controllers["SELECTOR_ALERTS_CONTAINER"]["ok"] is True
+    assert status.controllers["SELECTOR_USER_MENU"]["ok"] is True
 
 
 def test_health_monitor_fails_when_alerts_button_missing():
@@ -122,7 +123,16 @@ def test_health_monitor_fails_when_alerts_button_missing():
     driver.selectors.pop(config.SELECTOR_ALERTS_BUTTON)
     status = _monitor(driver).check_elements()
     assert status.is_healthy is False
-    assert any("alerts_button" in issue for issue in status.issues)
+    assert any("SELECTOR_ALERTS_BUTTON" in issue for issue in status.issues)
+
+
+def test_wrong_env_selector_is_reported():
+    driver = _healthy_driver()
+    driver.selectors.pop(config.SELECTOR_ALERTS_CONTAINER)
+    status = _monitor(driver).check_elements()
+    assert status.is_healthy is False
+    assert status.controllers["SELECTOR_ALERTS_CONTAINER"]["ok"] is False
+    assert any("SELECTOR_ALERTS_CONTAINER not found" in issue for issue in status.issues)
 
 
 def test_health_monitor_log_tab_optional():
@@ -130,7 +140,7 @@ def test_health_monitor_log_tab_optional():
     driver.selectors.pop(config.SELECTOR_LOG_TAB)
     status = _monitor(driver).check_elements()
     assert status.is_healthy is True
-    assert status.controllers["log_tab"]["ok"] is False
+    assert status.controllers["SELECTOR_LOG_TAB"]["ok"] is False
 
 
 def test_health_monitor_detects_login_page():
