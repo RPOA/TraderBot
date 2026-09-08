@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from selenium import webdriver
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
+from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException, TimeoutException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -20,6 +20,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from . import config
+from .logutil import short_exc
 
 logger = logging.getLogger("watcher")
 
@@ -103,10 +104,10 @@ def open_alerts_panel(driver: webdriver.Chrome) -> bool:
                     log_tab = driver.find_element(By.CSS_SELECTOR, config.SELECTOR_LOG_TAB)
                     if log_tab.get_attribute("tabindex") != "0":
                         log_tab.click()
-                except NoSuchElementException:
+                except (NoSuchElementException, StaleElementReferenceException):
                     pass
                 return True
-        except NoSuchElementException:
+        except (NoSuchElementException, StaleElementReferenceException):
             pass
 
         wait = WebDriverWait(driver, 3)
@@ -125,7 +126,7 @@ def open_alerts_panel(driver: webdriver.Chrome) -> bool:
             logger.debug("Log tab not present yet (no alerts)")
         return True
     except Exception as exc:
-        logger.error("Failed to open alerts panel: %s", exc)
+        logger.error("Failed to open alerts panel: %s", short_exc(exc))
         return False
 
 
@@ -142,7 +143,7 @@ def get_active_alerts(driver: webdriver.Chrome, alert_name_filter: list[str]) ->
     try:
         elements = driver.find_elements(By.XPATH, xpath)
     except Exception as exc:
-        logger.error("Failed to query alerts: %s", exc)
+        logger.error("Failed to query alerts: %s", short_exc(exc))
         return []
 
     for elem in elements:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -18,6 +19,7 @@ from .config import (
 from .direction import DirectionState
 from .logutil import memory_handler, parse_console_params, render_console_html
 from .parser import parse_secret_payload, parse_trade_command, parse_trend_command
+from .hyperliquid_client import prepare_triggers
 from .tickers import TickerRegistry
 
 logger = logging.getLogger("trader")
@@ -114,6 +116,29 @@ async def handle_do_trade(request: web.Request) -> web.Response:
     except (KeyError, RuntimeError) as exc:
         return _json_error(str(exc), 503)
 
+    assigned_sl = parsed["stop_loss_price"]
+    assigned_tp = parsed["take_profit_price"]
+    if assigned_sl is not None or assigned_tp is not None:
+        resolved = tickers.resolve(parsed["ticker"])
+        coin = resolved.resolved_coin
+        assert coin is not None
+        try:
+            mid = await asyncio.to_thread(broker.get_wallet(wallet_id).mid_price, coin)
+        except Exception as exc:
+            logger.warning("Rejected /do_trade, no mid: %s", exc)
+            return _json_error(f"Cannot read mid price: {exc}", 503)
+        assigned_sl, assigned_tp, notes, err = prepare_triggers(
+            action == "buy",
+            mid,
+            assigned_sl,
+            assigned_tp,
+        )
+        for note in notes:
+            logger.info("%s %s", parsed["ticker"], note)
+        if err:
+            logger.warning("Rejected /do_trade: %s", err)
+            return _json_error(err, 400)
+
     await broker.enqueue(parsed)
     return web.json_response(
         {
@@ -122,8 +147,8 @@ async def handle_do_trade(request: web.Request) -> web.Response:
             "action": action,
             "ticker": parsed["ticker"],
             "wallet_id": wallet_id,
-            "stop_loss_price": parsed["stop_loss_price"],
-            "take_profit_price": parsed["take_profit_price"],
+            "stop_loss_price": assigned_sl,
+            "take_profit_price": assigned_tp,
         }
     )
 

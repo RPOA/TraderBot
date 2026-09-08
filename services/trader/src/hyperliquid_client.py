@@ -29,6 +29,142 @@ def _round_size(size: float, sz_decimals: int) -> float:
     return math.floor(size * factor) / factor
 
 
+UNIFIED_ACCOUNT_MODES = {"unifiedAccount", "portfolioMargin"}
+PERP_MAX_DECIMALS = 6
+TRIGGER_LIMIT_SLIPPAGE = 0.08
+
+
+def _round_px(px: float, sz_decimals: int) -> float:
+    decimals = max(0, PERP_MAX_DECIMALS - int(sz_decimals))
+    factor = 10 ** decimals
+    return math.floor(px * factor + 0.5) / factor
+
+
+def fill_avg_px(raw: Any) -> float | None:
+    try:
+        statuses = (((raw or {}).get("response") or {}).get("data") or {}).get("statuses") or []
+        for status in statuses:
+            filled = (status or {}).get("filled") or {}
+            px = filled.get("avgPx")
+            if px not in (None, ""):
+                return float(px)
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def trigger_already_active(is_long: bool, tpsl: str, trigger_px: float, mark_px: float) -> bool:
+    """True if this TP/SL is already in the money and would close the new position."""
+    if tpsl == "sl":
+        return mark_px <= trigger_px if is_long else mark_px >= trigger_px
+    return mark_px >= trigger_px if is_long else mark_px <= trigger_px
+
+
+def prepare_triggers(
+    is_long: bool,
+    entry_px: float,
+    stop_loss: float | None,
+    take_profit: float | None,
+) -> tuple[float | None, float | None, list[str], str | None]:
+    """Assign SL/TP for this side, or return an error if they cannot form a valid band.
+
+    The lower alert price is the downside of the range, the higher is the upside.
+    Long: SL = lower, TP = higher. Short: switched (SL = higher, TP = lower).
+    """
+    notes: list[str] = []
+    if stop_loss is None and take_profit is None:
+        return None, None, notes, None
+
+    sl, tp = stop_loss, take_profit
+    if sl is not None and tp is not None:
+        if sl == tp:
+            return None, None, notes, f"SL and TP are equal ({sl}) vs entry {entry_px}"
+        low, high = (sl, tp) if sl < tp else (tp, sl)
+        if not (low < entry_px < high):
+            side = "long" if is_long else "short"
+            return (
+                None,
+                None,
+                notes,
+                f"SL/TP {low}/{high} outside range vs entry {entry_px} ({side})",
+            )
+        sl, tp = (low, high) if is_long else (high, low)
+        if sl != stop_loss or tp != take_profit:
+            notes.append(f"SL/TP assigned: SL {sl} TP {tp}")
+    else:
+        if sl is not None and trigger_already_active(is_long, "sl", sl, entry_px):
+            need = "below" if is_long else "above"
+            return None, None, notes, f"SL {sl} is on the wrong side of entry {entry_px} (needs to be {need})"
+        if tp is not None and trigger_already_active(is_long, "tp", tp, entry_px):
+            need = "above" if is_long else "below"
+            return None, None, notes, f"TP {tp} is on the wrong side of entry {entry_px} (needs to be {need})"
+
+    if sl is not None and trigger_already_active(is_long, "sl", sl, entry_px):
+        return None, None, notes, f"SL {sl} would fire immediately vs entry {entry_px}"
+    if tp is not None and trigger_already_active(is_long, "tp", tp, entry_px):
+        return None, None, notes, f"TP {tp} would fire immediately vs entry {entry_px}"
+    return sl, tp, notes, None
+
+
+def assign_sl_tp(
+    is_long: bool,
+    entry_px: float,
+    stop_loss: float | None,
+    take_profit: float | None,
+) -> tuple[float | None, float | None, list[str]]:
+    sl, tp, notes, _err = prepare_triggers(is_long, entry_px, stop_loss, take_profit)
+    return sl, tp, notes
+
+
+def exchange_status_error(raw: Any) -> str | None:
+    if not isinstance(raw, dict):
+        return f"Unexpected exchange response: {raw}"
+    if raw.get("status") != "ok":
+        return str(raw.get("response") or raw)
+    statuses = (((raw.get("response") or {}).get("data") or {}).get("statuses") or [])
+    errors = [str(item.get("error")) for item in statuses if isinstance(item, dict) and item.get("error")]
+    if errors:
+        return "; ".join(errors)
+    return None
+
+
+def trigger_limit_px(close_is_buy: bool, trigger_px: float, sz_decimals: int) -> float:
+    """Limit once the trigger fires — slightly worse than trigger so a market TP/SL can fill."""
+    slipped = trigger_px * (1 + TRIGGER_LIMIT_SLIPPAGE) if close_is_buy else trigger_px * (1 - TRIGGER_LIMIT_SLIPPAGE)
+    return _round_px(max(slipped, 0.0), sz_decimals)
+
+
+def _spot_usdc_available(spot_state: dict[str, Any] | None) -> float:
+    for item in (spot_state or {}).get("balances") or []:
+        if str(item.get("coin") or "").upper() != "USDC":
+            continue
+        total = float(item.get("total") or 0)
+        hold = float(item.get("hold") or 0)
+        return max(0.0, total - hold)
+    return 0.0
+
+
+def _perp_account_value(perp_state: dict[str, Any] | None) -> float:
+    summary = (perp_state or {}).get("marginSummary") or {}
+    return float(summary.get("accountValue") or 0)
+
+
+def trading_account_value(
+    perp_state: dict[str, Any] | None,
+    spot_state: dict[str, Any] | None,
+    abstraction: str | None,
+) -> float:
+    """Collateral used for perp sizing.
+
+    Unified / portfolio margin keep USDC in spotClearinghouseState.
+    Classic (manual) accounts keep perp collateral in clearinghouseState.
+    """
+    perp = _perp_account_value(perp_state)
+    if abstraction in UNIFIED_ACCOUNT_MODES:
+        return max(perp, _spot_usdc_available(spot_state))
+    return perp
+
+
 def collect_universe(info: Info, wanted_coins: set[str] | None = None) -> list[dict[str, Any]]:
     """Collect the default perp universe plus any HIP-3 coins we explicitly want.
 
@@ -109,6 +245,19 @@ class HyperliquidWallet:
     def user_state(self) -> dict[str, Any]:
         return self.info.user_state(self.address)
 
+    def spot_user_state(self) -> dict[str, Any]:
+        return self.info.spot_user_state(self.address) or {}
+
+    def abstraction_mode(self) -> str:
+        try:
+            raw = self.info.query_user_abstraction_state(self.address)
+        except Exception as exc:
+            logger.debug("userAbstraction unavailable: %s", exc)
+            return "default"
+        if isinstance(raw, str) and raw:
+            return raw
+        return "default"
+
     def mid_price(self, coin: str) -> float:
         mids = self.info.all_mids()
         if coin not in mids:
@@ -124,33 +273,101 @@ class HyperliquidWallet:
         return 0.0
 
     def account_value(self) -> float:
-        state = self.user_state()
-        summary = state.get("marginSummary") or {}
-        return float(summary.get("accountValue") or 0)
+        return trading_account_value(
+            self.user_state(),
+            self.spot_user_state(),
+            self.abstraction_mode(),
+        )
 
     def wallet_snapshot(self) -> dict[str, Any]:
         state = self.user_state()
+        try:
+            mids = {str(k): float(v) for k, v in (self.info.all_mids() or {}).items()}
+        except Exception:
+            mids = {}
+
         positions = []
         for item in state.get("assetPositions") or []:
             pos = item.get("position") or {}
             szi = float(pos.get("szi") or 0)
             if szi == 0:
                 continue
+            coin = pos.get("coin")
+            mark = mids.get(str(coin))
+            if mark is None and coin:
+                mark = mids.get(str(coin).split(":")[-1])
+            entry = pos.get("entryPx")
+            pnl = pos.get("unrealizedPnl")
             positions.append(
                 {
-                    "coin": pos.get("coin"),
+                    "coin": coin,
                     "size": szi,
                     "side": "long" if szi > 0 else "short",
-                    "entry_px": pos.get("entryPx"),
-                    "unrealized_pnl": pos.get("unrealizedPnl"),
+                    "entry_px": float(entry) if entry not in (None, "") else None,
+                    "mark_px": mark,
+                    "unrealized_pnl": float(pnl) if pnl not in (None, "") else 0.0,
                 }
             )
+
+        orders = []
+        try:
+            raw_orders = self.info.frontend_open_orders(self.address) or []
+        except Exception as exc:
+            logger.debug("frontend_open_orders failed: %s", exc)
+            try:
+                raw_orders = self.info.open_orders(self.address) or []
+            except Exception:
+                raw_orders = []
+        for order in raw_orders:
+            trigger_raw = order.get("triggerPx")
+            try:
+                trigger_px = float(trigger_raw) if trigger_raw not in (None, "") else None
+            except (TypeError, ValueError):
+                trigger_px = None
+            if trigger_px == 0:
+                trigger_px = None
+            limit_raw = order.get("limitPx")
+            try:
+                limit_px = float(limit_raw) if limit_raw not in (None, "") else None
+            except (TypeError, ValueError):
+                limit_px = None
+            orders.append(
+                {
+                    "oid": order.get("oid"),
+                    "coin": order.get("coin"),
+                    "side": "long" if order.get("side") == "B" else "short",
+                    "size": float(order.get("sz") or 0),
+                    "limit_px": limit_px,
+                    "trigger_px": trigger_px,
+                    "is_trigger": bool(order.get("isTrigger")),
+                    "reduce_only": bool(order.get("reduceOnly")),
+                    "order_type": order.get("orderType") or ("trigger" if order.get("isTrigger") else "limit"),
+                }
+            )
+
+        spot_state = {}
+        try:
+            spot_state = self.spot_user_state()
+        except Exception as exc:
+            logger.debug("spot_user_state failed: %s", exc)
+        abstraction = self.abstraction_mode()
+        spot_usdc = _spot_usdc_available(spot_state)
+        perp_value = _perp_account_value(state)
+        account_value = trading_account_value(state, spot_state, abstraction)
+        withdrawable = float(state.get("withdrawable") or 0)
+        if abstraction in UNIFIED_ACCOUNT_MODES:
+            withdrawable = max(withdrawable, spot_usdc)
+
         return {
             "wallet_id": self.wallet_id,
             "address": self.address,
-            "account_value": float((state.get("marginSummary") or {}).get("accountValue") or 0),
-            "withdrawable": float(state.get("withdrawable") or 0),
+            "abstraction": abstraction,
+            "account_value": account_value,
+            "perp_account_value": perp_value,
+            "spot_usdc": spot_usdc,
+            "withdrawable": withdrawable,
             "positions": positions,
+            "open_orders": orders,
         }
 
     def calculate_size(self, coin: str, sz_decimals: int, qty_percentage: float | None) -> float:
@@ -158,7 +375,10 @@ class HyperliquidWallet:
         mid = self.mid_price(coin)
         notional = self.account_value() * (pct / 100.0) * self.leverage
         if mid <= 0 or notional <= 0:
-            raise ValueError("Cannot size position: mid or account value is zero")
+            raise ValueError(
+                "Cannot size position: mid or account value is zero "
+                "(unified accounts keep USDC in spot, not perps)"
+            )
         size = _round_size(notional / mid, sz_decimals)
         if size <= 0:
             raise ValueError("Calculated size is zero — increase collateral or leverage")
@@ -176,22 +396,36 @@ class HyperliquidWallet:
     def market_close(self, coin: str, size: float | None = None) -> Any:
         return self.exchange.market_close(coin, sz=size, slippage=0.02)
 
-    def place_trigger(
+    def place_tpsl(
         self,
         coin: str,
-        is_buy: bool,
+        close_is_buy: bool,
         size: float,
-        trigger_px: float,
-        tpsl: str,
+        sz_decimals: int,
+        stop_loss: float | None,
+        take_profit: float | None,
     ) -> Any:
-        return self.exchange.order(
-            coin,
-            is_buy,
-            size,
-            trigger_px,
-            {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": tpsl}},
-            reduce_only=True,
-        )
+        orders: list[dict[str, Any]] = []
+        for price, tpsl in ((stop_loss, "sl"), (take_profit, "tp")):
+            if price is None:
+                continue
+            trigger_px = _round_px(price, sz_decimals)
+            orders.append(
+                {
+                    "coin": coin,
+                    "is_buy": close_is_buy,
+                    "sz": size,
+                    "limit_px": trigger_limit_px(close_is_buy, trigger_px, sz_decimals),
+                    "order_type": {
+                        "trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": tpsl}
+                    },
+                    "reduce_only": True,
+                }
+            )
+        if not orders:
+            return None
+        grouping = "positionTpsl" if len(orders) > 1 else "na"
+        return self.exchange.bulk_orders(orders, grouping=grouping)
 
     async def wait_flat(self, coin: str, timeout: float = 20.0) -> bool:
         deadline = time.monotonic() + timeout

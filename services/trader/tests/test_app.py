@@ -11,6 +11,9 @@ class FakeWallet:
     ready = True
     address = "0xabc"
 
+    def mid_price(self, coin):
+        return 100.0
+
 
 class FakeBroker:
     def __init__(self):

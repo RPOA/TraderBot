@@ -8,7 +8,12 @@ import time
 from typing import Any
 
 from .config import CLOSE_ON_TREND_CHANGE, DEFAULT_WALLET_ID
-from .hyperliquid_client import HyperliquidWallet
+from .hyperliquid_client import (
+    HyperliquidWallet,
+    exchange_status_error,
+    fill_avg_px,
+    prepare_triggers,
+)
 from .tickers import TickerRegistry
 
 logger = logging.getLogger("trader")
@@ -61,6 +66,26 @@ class Broker:
             self._log_result(action, ticker, wallet_id, result)
             return result
 
+        sl = trade.get("stop_loss_price")
+        tp = trade.get("take_profit_price")
+        if sl is not None or tp is not None:
+            try:
+                mid = await asyncio.to_thread(wallet.mid_price, coin)
+            except Exception as exc:
+                result = {"success": False, "error": f"Cannot read mid price: {exc}"}
+                result["execution_time"] = time.monotonic() - started
+                self._log_result(action, ticker, wallet_id, result)
+                return result
+            _sl, _tp, notes, err = prepare_triggers(action == "buy", mid, sl, tp)
+            for note in notes:
+                logger.info("%s/%s %s", wallet_id, coin, note)
+            if err:
+                logger.warning("Rejected %s %s: %s", action, ticker, err)
+                result = {"success": False, "error": err}
+                result["execution_time"] = time.monotonic() - started
+                self._log_result(action, ticker, wallet_id, result)
+                return result
+
         existing = await asyncio.to_thread(wallet.position_size, coin)
         if abs(existing) > 1e-12:
             side = "long" if existing > 0 else "short"
@@ -108,6 +133,20 @@ class Broker:
             logger.exception("market_close failed")
             return {"success": False, "error": str(exc)}
 
+    def _rollback(self, wallet: HyperliquidWallet, coin: str, reason: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        logger.error("Rolling back %s/%s: %s", wallet.wallet_id, coin, reason)
+        close = self._close(wallet, coin)
+        result: dict[str, Any] = {
+            "success": False,
+            "error": reason,
+            "rolled_back": bool(close.get("success")),
+        }
+        if extra:
+            result.update(extra)
+        if not close.get("success"):
+            result["rollback_error"] = close.get("error")
+        return result
+
     def _open(
         self,
         wallet: HyperliquidWallet,
@@ -119,31 +158,65 @@ class Broker:
         qty_percentage: float | None,
     ) -> dict[str, Any]:
         is_buy = action == "buy"
+        opened = False
         try:
+            mid = wallet.mid_price(coin)
+            placed_sl, placed_tp, notes, err = prepare_triggers(is_buy, mid, stop_loss, take_profit)
+            if err:
+                return {"success": False, "error": err}
+            for note in notes:
+                logger.info("%s/%s %s", wallet.wallet_id, coin, note)
+
             wallet.set_leverage(coin)
             size = wallet.calculate_size(coin, sz_decimals, qty_percentage)
             raw = wallet.market_open(coin, is_buy, size)
-            sl_raw = None
-            tp_raw = None
-            if stop_loss is not None or take_profit is not None:
-                # Triggers close the position, so side is opposite the entry.
-                close_is_buy = not is_buy
-                if stop_loss is not None:
-                    sl_raw = wallet.place_trigger(coin, close_is_buy, size, stop_loss, "sl")
-                if take_profit is not None:
-                    tp_raw = wallet.place_trigger(coin, close_is_buy, size, take_profit, "tp")
+            entry_px = fill_avg_px(raw)
+            open_err = exchange_status_error(raw)
+            if entry_px is None:
+                if open_err:
+                    return {"success": False, "error": open_err, "raw": raw}
+                return {"success": False, "error": "Entry order did not fill", "raw": raw}
+            opened = True
+
+            placed_sl, placed_tp, notes, err = prepare_triggers(is_buy, entry_px, stop_loss, take_profit)
+            for note in notes:
+                logger.info("%s/%s %s", wallet.wallet_id, coin, note)
+            if err:
+                return self._rollback(wallet, coin, err, {"entry_px": entry_px, "raw": raw})
+
+            tpsl_raw = None
+            if placed_sl is not None or placed_tp is not None:
+                tpsl_raw = wallet.place_tpsl(
+                    coin,
+                    close_is_buy=not is_buy,
+                    size=size,
+                    sz_decimals=sz_decimals,
+                    stop_loss=placed_sl,
+                    take_profit=placed_tp,
+                )
+                tpsl_err = exchange_status_error(tpsl_raw)
+                if tpsl_err:
+                    return self._rollback(
+                        wallet,
+                        coin,
+                        f"TP/SL failed: {tpsl_err}",
+                        {"entry_px": entry_px, "raw": raw, "tpsl_raw": tpsl_raw},
+                    )
             return {
                 "success": True,
                 "coin": coin,
                 "size": size,
+                "entry_px": entry_px,
                 "raw": raw,
-                "stop_loss_price": stop_loss,
-                "take_profit_price": take_profit,
-                "stop_loss_raw": sl_raw,
-                "take_profit_raw": tp_raw,
+                "stop_loss_price": placed_sl,
+                "take_profit_price": placed_tp,
+                "tpsl_raw": tpsl_raw,
+                "trigger_notes": notes,
             }
         except Exception as exc:
             logger.exception("open failed")
+            if opened:
+                return self._rollback(wallet, coin, str(exc))
             return {"success": False, "error": str(exc)}
 
     async def close_all_positions(self, wallet_id: str | None = None) -> dict[str, Any]:

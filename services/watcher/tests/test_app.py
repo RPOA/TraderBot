@@ -27,6 +27,20 @@ class FakeWatcher:
         return None
 
 
+class UnhealthyWatcher(FakeWatcher):
+    def snapshot(self):
+        return {
+            "is_running": True,
+            "logged_in": True,
+            "health": {
+                "is_healthy": False,
+                "issues": ["Alerts panel not opened on watcher tab"],
+                "scrape_ok": False,
+            },
+            "orders": {"total": 0},
+        }
+
+
 class WatcherApiTests(AioHTTPTestCase):
     async def get_application(self):
         return create_app(FakeWatcher())
@@ -54,3 +68,22 @@ class WatcherApiTests(AioHTTPTestCase):
         assert "Watcher Console" in text
         assert "#f9c513" in text
         assert 'id="autoscroll-btn" class="active"' in text
+
+
+class WatcherHealthDegradedTests(AioHTTPTestCase):
+    async def get_application(self):
+        return create_app(UnhealthyWatcher())
+
+    async def test_health_reports_degraded_when_scrape_fails(self):
+        resp = await self.client.get("/health")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["status"] == "degraded"
+        assert body["health"]["is_healthy"] is False
+        assert "Alerts panel not opened on watcher tab" in body["health"]["issues"]
+
+    async def test_status_exposes_health_issues(self):
+        resp = await self.client.get("/status")
+        body = await resp.json()
+        assert body["health"]["is_healthy"] is False
+        assert body["health"]["scrape_ok"] is False

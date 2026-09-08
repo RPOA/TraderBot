@@ -27,6 +27,13 @@ class MemoryLogHandler(logging.Handler):
 memory_handler = MemoryLogHandler()
 
 
+def short_exc(exc: BaseException) -> str:
+    text = str(exc).strip().split("\n", 1)[0].strip()
+    if text.startswith("Message:"):
+        text = text[8:].strip()
+    return text or type(exc).__name__
+
+
 def parse_console_params(query) -> tuple[int, int, bool]:
     try:
         lines = min(max(int(query.get("lines", "200")), 1), 500)
