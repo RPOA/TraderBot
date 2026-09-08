@@ -42,6 +42,7 @@ SECRET||##buy/SOLUSDT.P##
 SECRET||##buy/SOLUSDT.P/0/0##
 SECRET||##sell/TSLAUSDT.P/180/200/15##@main
 SECRET||##close/SOLUSDT.P##
+SECRET||##close/all##
 ```
 
 `POST /trend` — direction `short` | `long` | `all`
@@ -59,7 +60,10 @@ Rules:
 
 Tickers live in `services/trader/tickers.yaml` and are resolved against the live HyperLiquid universe on startup (SOL, BTC, ETH, TSLA by default).
 
-Supervision: `GET /health` `/status` `/logs` `/wallet` `/direction` `/tickers`
+Supervision: `GET /health` `/status` `/logs` `/console` `/wallet` `/direction` `/tickers`
+
+Console (HTML, auto-refresh): `http://localhost:18080/console`  
+Optional query: `?lines=200&refresh=5&autoscroll=true`
 
 ## Watcher
 
@@ -70,8 +74,10 @@ Alert names are comma-separated in `.env`:
 
 Alerts must include `{{timenow}}` so they can be deduplicated.
 
-Supervision: `GET /health` `/status` `/logs` `/orders` `/alerts`  
+Supervision: `GET /health` `/status` `/logs` `/console` `/orders` `/alerts`  
 `POST /control/restart_browser` restarts the Selenium loop without killing the container.
+
+Console (HTML, auto-refresh): `http://localhost:18090/console`
 
 ## Local tests
 

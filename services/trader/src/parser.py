@@ -61,7 +61,10 @@ def parse_trade_command(payload: str, allowed_tickers: set[str] | None = None) -
     ticker = parts[1]
     if action not in ("buy", "sell", "close"):
         raise ValueError(f"Invalid action: {action}")
-    if allowed_tickers is not None and ticker not in allowed_tickers:
+    close_all = action == "close" and ticker.lower() == "all"
+    if close_all:
+        ticker = "all"
+    elif allowed_tickers is not None and ticker not in allowed_tickers:
         raise ValueError(f"Unsupported ticker: {ticker}")
 
     result: dict[str, Any] = {

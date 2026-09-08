@@ -146,14 +146,39 @@ class Broker:
             logger.exception("open failed")
             return {"success": False, "error": str(exc)}
 
+    async def close_all_positions(self, wallet_id: str | None = None) -> dict[str, Any]:
+        if wallet_id:
+            if wallet_id not in self.wallets:
+                return {
+                    "closed": [],
+                    "errors": [{"wallet_id": wallet_id, "error": f"Unknown wallet: {wallet_id}"}],
+                    "skipped": False,
+                }
+            targets = {wallet_id: self.wallets[wallet_id]}
+        else:
+            targets = self.wallets
+        return await self._close_positions(targets, lambda _side: (True, "close all"))
+
     async def close_on_trend_change(self, new_direction: str) -> dict[str, Any]:
         if not CLOSE_ON_TREND_CHANGE:
             return {"closed": [], "errors": [], "skipped": True}
 
+        def decide(side: str) -> tuple[bool, str]:
+            if new_direction == "all":
+                return True, "flip to all — close first (HyperLiquid may reject pyramiding)"
+            if new_direction == "long" and side == "short":
+                return True, "SHORT conflicts with LONG"
+            if new_direction == "short" and side == "long":
+                return True, "LONG conflicts with SHORT"
+            return False, ""
+
+        return await self._close_positions(self.wallets, decide)
+
+    async def _close_positions(self, targets: dict[str, HyperliquidWallet], decide) -> dict[str, Any]:
         closed: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
 
-        for wallet_id, wallet in self.wallets.items():
+        for wallet_id, wallet in targets.items():
             try:
                 snapshot = await asyncio.to_thread(wallet.wallet_snapshot)
             except Exception as exc:
@@ -163,23 +188,12 @@ class Broker:
             for pos in snapshot["positions"]:
                 coin = pos["coin"]
                 side = pos["side"]
-                should_close = False
-                reason = ""
-                if new_direction == "all":
-                    should_close = True
-                    reason = "flip to all — close first (HyperLiquid may reject pyramiding)"
-                elif new_direction == "long" and side == "short":
-                    should_close = True
-                    reason = "SHORT conflicts with LONG"
-                elif new_direction == "short" and side == "long":
-                    should_close = True
-                    reason = "LONG conflicts with SHORT"
-
+                should_close, reason = decide(side)
                 if not should_close:
-                    logger.info("Keeping %s/%s %s (aligns with %s)", wallet_id, coin, side, new_direction)
+                    logger.info("Keeping %s/%s %s", wallet_id, coin, side)
                     continue
 
-                logger.info("Trend close %s/%s: %s", wallet_id, coin, reason)
+                logger.info("Close %s/%s: %s", wallet_id, coin, reason)
                 result = await asyncio.to_thread(self._close, wallet, coin)
                 if result.get("success"):
                     await wallet.wait_flat(coin)

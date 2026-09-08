@@ -16,7 +16,7 @@ from .config import (
     WEBHOOK_SECRET,
 )
 from .direction import DirectionState
-from .logutil import memory_handler
+from .logutil import memory_handler, parse_console_params, render_console_html
 from .parser import parse_secret_payload, parse_trade_command, parse_trend_command
 from .tickers import TickerRegistry
 
@@ -38,6 +38,7 @@ def create_app(broker: Broker, direction: DirectionState, tickers: TickerRegistr
     app.router.add_get("/health", handle_health)
     app.router.add_get("/status", handle_status)
     app.router.add_get("/logs", handle_logs)
+    app.router.add_get("/console", handle_console)
     app.router.add_get("/wallet", handle_wallet)
     app.router.add_get("/direction", handle_direction)
     app.router.add_get("/tickers", handle_tickers)
@@ -70,10 +71,32 @@ async def handle_do_trade(request: web.Request) -> web.Response:
 
     try:
         parsed = parse_trade_command(command, allowed_tickers=tickers.allowed_alerts)
-        tickers.resolve(parsed["ticker"])
+        if not (parsed["action"] == "close" and parsed["ticker"] == "all"):
+            tickers.resolve(parsed["ticker"])
     except ValueError as exc:
         logger.warning("Rejected /do_trade: %s", exc)
         return _json_error(str(exc), 400)
+
+    action = parsed["action"]
+    if action == "close" and parsed["ticker"] == "all":
+        wallet_id = parsed["wallet_id"] if "##@" in command else None
+        if wallet_id is not None and wallet_id not in broker.wallets:
+            return _json_error(
+                f"Unknown wallet: {wallet_id}. Available: {list(broker.wallets)}",
+                400,
+            )
+        results = await broker.close_all_positions(wallet_id)
+        return web.json_response(
+            {
+                "success": not results.get("errors"),
+                "message": "Closed all positions",
+                "action": "close",
+                "ticker": "all",
+                "wallet_id": wallet_id or "all",
+                "positions_closed": results.get("closed", []),
+                "close_errors": results.get("errors", []),
+            }
+        )
 
     wallet_id = parsed["wallet_id"]
     if wallet_id not in broker.wallets:
@@ -82,7 +105,6 @@ async def handle_do_trade(request: web.Request) -> web.Response:
             400,
         )
 
-    action = parsed["action"]
     if not direction.allows(action):
         logger.warning("Blocked %s (direction=%s)", action, direction.value)
         return _json_error(f"{action} orders blocked (direction={direction.value})", 400)
@@ -189,7 +211,18 @@ async def handle_logs(request: web.Request) -> web.Response:
         lines = min(int(request.query.get("lines", "50")), 500)
     except ValueError:
         lines = 50
-    return web.json_response({"lines": memory_handler.lines(lines)})
+    return web.json_response({"success": True, "lines": memory_handler.lines(lines)})
+
+
+async def handle_console(request: web.Request) -> web.Response:
+    n_lines, refresh, autoscroll = parse_console_params(request.query)
+    body = render_console_html(
+        "Trader Console",
+        memory_handler.lines(n_lines),
+        refresh,
+        autoscroll,
+    )
+    return web.Response(text=body, content_type="text/html")
 
 
 async def handle_wallet(request: web.Request) -> web.Response:

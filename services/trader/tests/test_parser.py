@@ -48,6 +48,13 @@ def test_unknown_ticker():
         assert "Unsupported ticker" in str(exc)
 
 
+def test_close_all_bypasses_allowlist():
+    parsed = parse_trade_command("##close/all##", ALLOWED)
+    assert parsed["action"] == "close"
+    assert parsed["ticker"] == "all"
+    assert parsed["wallet_id"] == "main"
+
+
 def test_secret_split():
     secret, command = parse_secret_payload("abc||##buy/SOLUSDT.P##")
     assert secret == "abc"
