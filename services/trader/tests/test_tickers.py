@@ -44,6 +44,7 @@ tickers:
         ]
     )
     assert registry.resolve("TSLA").resolved_coin == "xyz:TSLA"
+    assert registry.extra_dexes() == ["xyz"]
 
 
 def test_inactive_when_missing(tmp_path: Path):

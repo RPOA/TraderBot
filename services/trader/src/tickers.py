@@ -87,6 +87,13 @@ class TickerRegistry:
             ticker.active = True
             logger.info("Ticker %s -> %s (szDecimals=%s)", ticker.alert, ticker.resolved_coin, ticker.sz_decimals)
 
+    def extra_dexes(self) -> list[str]:
+        from .hyperliquid_client import extra_perp_dexes
+
+        return extra_perp_dexes(
+            [t.resolved_coin for t in self.tickers.values() if t.active and t.resolved_coin]
+        )
+
     def snapshot(self) -> list[dict[str, Any]]:
         return [
             {

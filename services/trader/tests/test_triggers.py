@@ -1,4 +1,10 @@
-from src.hyperliquid_client import fill_avg_px, prepare_triggers, trigger_already_active, trigger_limit_px
+from src.hyperliquid_client import (
+    _round_px,
+    fill_avg_px,
+    prepare_triggers,
+    trigger_already_active,
+    trigger_limit_px,
+)
 
 
 def test_short_tp_above_entry_would_close_immediately():
@@ -31,6 +37,23 @@ def test_fill_avg_px():
 def test_trigger_limit_px_is_more_aggressive():
     assert trigger_limit_px(True, 100, 2) > 100
     assert trigger_limit_px(False, 100, 2) < 100
+
+
+def test_round_px_five_sig_figs_and_decimals():
+    # SOL szDecimals=2 → max 4 decimal places, 5 sig figs.
+    # 90.9972 (SL limit after 8% slippage) and 1093.51 (6 sig figs) were rejected.
+    assert _round_px(90.9972, 2) == 90.997
+    assert _round_px(1093.51, 2) == 1093.5
+    assert _round_px(98.91, 2) == 98.91
+    assert _round_px(1234.56, 2) == 1234.6
+
+
+def test_round_px_integer_above_100k():
+    assert _round_px(123456.7, 5) == 123457.0
+
+
+def test_sol_sl_limit_after_slippage_is_valid():
+    assert trigger_limit_px(False, 98.91, 2) == 90.997
 
 
 def test_short_swaps_low_high_alert_prices():

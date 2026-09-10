@@ -61,6 +61,7 @@ async def run() -> None:
                     collateral_percentage=float(cfg["collateral_percentage"]),
                     network=HYPERLIQUID_NETWORK,
                     account_address=str(cfg.get("account_address") or ""),
+                    perp_dexs=tickers.extra_dexes(),
                 )
             except Exception:
                 logger.exception("Failed to init wallet %s", wallet_id)

@@ -32,12 +32,27 @@ def _round_size(size: float, sz_decimals: int) -> float:
 UNIFIED_ACCOUNT_MODES = {"unifiedAccount", "portfolioMargin"}
 PERP_MAX_DECIMALS = 6
 TRIGGER_LIMIT_SLIPPAGE = 0.08
+CORE_MARKET_SLIPPAGE = 0.02
+HIP3_MARKET_SLIPPAGE = 0.10
+
+
+def market_slippage(coin: str) -> float:
+    """HIP-3 books (xyz:TSLA) are thin — allow more IOC slippage than core perps."""
+    return HIP3_MARKET_SLIPPAGE if ":" in coin else CORE_MARKET_SLIPPAGE
 
 
 def _round_px(px: float, sz_decimals: int) -> float:
+    """Match HyperLiquid tick rules so TP/SL is not rejected as 'not divisible by tick size'.
+
+    Perps: at most 5 significant figures, and at most (6 - szDecimals) decimal places.
+    Integer prices above 100k are always valid. See hyperliquid-python-sdk examples/rounding.py.
+    """
+    if px <= 0:
+        return 0.0
+    if px > 100_000:
+        return float(round(px))
     decimals = max(0, PERP_MAX_DECIMALS - int(sz_decimals))
-    factor = 10 ** decimals
-    return math.floor(px * factor + 0.5) / factor
+    return float(round(float(f"{px:.5g}"), decimals))
 
 
 def fill_avg_px(raw: Any) -> float | None:
@@ -165,6 +180,20 @@ def trading_account_value(
     return perp
 
 
+def extra_perp_dexes(coins: list[str] | tuple[str, ...] | set[str]) -> list[str]:
+    """Builder dex prefixes from HIP-3 names like xyz:TSLA."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in coins:
+        if not name or ":" not in name:
+            continue
+        dex = name.split(":", 1)[0].strip()
+        if dex and dex not in seen:
+            seen.add(dex)
+            out.append(dex)
+    return out
+
+
 def collect_universe(info: Info, wanted_coins: set[str] | None = None) -> list[dict[str, Any]]:
     """Collect the default perp universe plus HIP-3 coins we explicitly want.
 
@@ -267,6 +296,7 @@ class HyperliquidWallet:
         collateral_percentage: float,
         network: str,
         account_address: str = "",
+        perp_dexs: list[str] | None = None,
     ):
         self.wallet_id = wallet_id
         self.leverage = leverage
@@ -278,13 +308,59 @@ class HyperliquidWallet:
         self.account = Account.from_key(key)
         self.address = account_address.strip() or self.account.address
         base_url = api_url(network)
-        self.info = Info(base_url, skip_ws=True)
-        self.exchange = Exchange(self.account, base_url, account_address=self.address)
+        self.extra_dexes = [dex for dex in (perp_dexs or []) if dex]
+        sdk_dexs = ["", *self.extra_dexes] if self.extra_dexes else None
+        if self.extra_dexes:
+            logger.info("Wallet %s loading HIP-3 dex(es): %s", wallet_id, ", ".join(self.extra_dexes))
+        self.info = Info(base_url, skip_ws=True, perp_dexs=sdk_dexs)
+        self.exchange = Exchange(
+            self.account,
+            base_url,
+            account_address=self.address,
+            perp_dexs=sdk_dexs,
+        )
         self.ready = True
         logger.info("Wallet %s ready (%s) L:%sx C:%s%%", wallet_id, self.address[:10], leverage, collateral_percentage)
 
     def user_state(self) -> dict[str, Any]:
-        return self.info.user_state(self.address)
+        state = self.info.user_state(self.address) or {}
+        if not self.extra_dexes:
+            return state
+        positions = list(state.get("assetPositions") or [])
+        seen = {(item.get("position") or {}).get("coin") for item in positions}
+        for dex in self.extra_dexes:
+            try:
+                extra = self.info.user_state(self.address, dex=dex) or {}
+            except Exception as exc:
+                logger.debug("user_state(dex=%s) unavailable: %s", dex, exc)
+                continue
+            for item in extra.get("assetPositions") or []:
+                coin = (item.get("position") or {}).get("coin")
+                if coin and coin not in seen:
+                    positions.append(item)
+                    seen.add(coin)
+        state["assetPositions"] = positions
+        return state
+
+    def _open_orders(self) -> list[dict[str, Any]]:
+        orders: list[dict[str, Any]] = []
+        seen: set[Any] = set()
+        dexes = [""] + self.extra_dexes
+        for dex in dexes:
+            try:
+                raw = self.info.frontend_open_orders(self.address, dex=dex) or []
+            except Exception:
+                try:
+                    raw = self.info.open_orders(self.address, dex=dex) or []
+                except Exception:
+                    raw = []
+            for order in raw:
+                key = order.get("oid") or (order.get("coin"), order.get("limitPx"), order.get("sz"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                orders.append(order)
+        return orders
 
     def spot_user_state(self) -> dict[str, Any]:
         return self.info.spot_user_state(self.address) or {}
@@ -366,14 +442,7 @@ class HyperliquidWallet:
             )
 
         orders = []
-        try:
-            raw_orders = self.info.frontend_open_orders(self.address) or []
-        except Exception as exc:
-            logger.debug("frontend_open_orders failed: %s", exc)
-            try:
-                raw_orders = self.info.open_orders(self.address) or []
-            except Exception:
-                raw_orders = []
+        raw_orders = self._open_orders()
         for order in raw_orders:
             trigger_raw = order.get("triggerPx")
             try:
@@ -447,10 +516,13 @@ class HyperliquidWallet:
             logger.warning("Could not update leverage for %s/%s: %s", self.wallet_id, coin, exc)
 
     def market_open(self, coin: str, is_buy: bool, size: float) -> Any:
-        return self.exchange.market_open(coin, is_buy, size, None, 0.02)
+        slip = market_slippage(coin)
+        if slip != CORE_MARKET_SLIPPAGE:
+            logger.info("HIP-3 market open %s slippage=%s", coin, slip)
+        return self.exchange.market_open(coin, is_buy, size, None, slip)
 
     def market_close(self, coin: str, size: float | None = None) -> Any:
-        return self.exchange.market_close(coin, sz=size, slippage=0.02)
+        return self.exchange.market_close(coin, sz=size, slippage=market_slippage(coin))
 
     def place_tpsl(
         self,
