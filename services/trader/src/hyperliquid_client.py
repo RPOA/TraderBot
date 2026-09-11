@@ -180,6 +180,84 @@ def trading_account_value(
     return perp
 
 
+def _float_or_none(raw: Any) -> float | None:
+    if raw in (None, ""):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _spot_mark_px(coin: str, token: Any, mids: dict[str, float]) -> float | None:
+    if str(coin).upper() == "USDC":
+        return 1.0
+    keys = [str(coin), f"{coin}/USDC"]
+    if token not in (None, ""):
+        keys.extend([f"@{token}", f"@{token}/USDC"])
+    for key in keys:
+        if key in mids:
+            return mids[key]
+    upper = {str(k).upper(): v for k, v in mids.items()}
+    for key in keys:
+        found = upper.get(key.upper())
+        if found is not None:
+            return found
+    return None
+
+
+def spot_assets_from_state(
+    spot_state: dict[str, Any] | None,
+    mids: dict[str, float],
+) -> list[dict[str, Any]]:
+    """Spot holdings with current USD value (mark, or entry notional if no mid)."""
+    assets: list[dict[str, Any]] = []
+    for item in (spot_state or {}).get("balances") or []:
+        total = float(item.get("total") or 0)
+        if total == 0:
+            continue
+        coin = str(item.get("coin") or "")
+        token = item.get("token")
+        mark = _spot_mark_px(coin, token, mids)
+        entry_ntl = _float_or_none(item.get("entryNtl"))
+        value = (total * mark) if mark is not None else entry_ntl
+        assets.append(
+            {
+                "coin": coin,
+                "size": total,
+                "hold": float(item.get("hold") or 0),
+                "mark_px": mark,
+                "value": value,
+            }
+        )
+    return assets
+
+
+def wallet_nav(
+    perp_value: float,
+    assets: list[dict[str, Any]],
+    abstraction: str | None,
+) -> float:
+    """Wallet equity: all spot assets at mark plus perp equity, without double-counting unified USDC.
+
+    Unified accounts lock USDC as perp margin (`hold`). That cash is already in
+    `perp_value` together with unrealized PnL, so it is removed from spot first.
+    Portfolio margin may already fold every asset into `accountValue`.
+    """
+    spot_total = 0.0
+    usdc_hold = 0.0
+    for asset in assets:
+        value = float(asset.get("value") or 0)
+        spot_total += value
+        if str(asset.get("coin") or "").upper() == "USDC":
+            usdc_hold += float(asset.get("hold") or 0)
+    if abstraction == "portfolioMargin":
+        return max(perp_value, spot_total)
+    if abstraction in UNIFIED_ACCOUNT_MODES:
+        return spot_total - usdc_hold + perp_value
+    return perp_value + spot_total
+
+
 def extra_perp_dexes(coins: list[str] | tuple[str, ...] | set[str]) -> list[str]:
     """Builder dex prefixes from HIP-3 names like xyz:TSLA."""
     out: list[str] = []
@@ -430,6 +508,7 @@ class HyperliquidWallet:
                     mark = mids.get(str(coin).split(":")[-1])
             entry = pos.get("entryPx")
             pnl = pos.get("unrealizedPnl")
+            value = abs(szi) * mark if mark is not None else None
             positions.append(
                 {
                     "coin": coin,
@@ -437,6 +516,7 @@ class HyperliquidWallet:
                     "side": "long" if szi > 0 else "short",
                     "entry_px": float(entry) if entry not in (None, "") else None,
                     "mark_px": mark,
+                    "value": value,
                     "unrealized_pnl": float(pnl) if pnl not in (None, "") else 0.0,
                 }
             )
@@ -479,6 +559,8 @@ class HyperliquidWallet:
         spot_usdc = _spot_usdc_available(spot_state)
         perp_value = _perp_account_value(state)
         account_value = trading_account_value(state, spot_state, abstraction)
+        assets = spot_assets_from_state(spot_state, mids)
+        wallet_value = wallet_nav(perp_value, assets, abstraction)
         withdrawable = float(state.get("withdrawable") or 0)
         if abstraction in UNIFIED_ACCOUNT_MODES:
             withdrawable = max(withdrawable, spot_usdc)
@@ -487,10 +569,12 @@ class HyperliquidWallet:
             "wallet_id": self.wallet_id,
             "address": self.address,
             "abstraction": abstraction,
+            "wallet_value": wallet_value,
             "account_value": account_value,
             "perp_account_value": perp_value,
             "spot_usdc": spot_usdc,
             "withdrawable": withdrawable,
+            "assets": assets,
             "positions": positions,
             "open_orders": orders,
         }

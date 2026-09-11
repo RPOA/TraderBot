@@ -260,7 +260,8 @@ async def handle_wallet(request: web.Request) -> web.Response:
                 snapshots.append(await asyncio.to_thread(wallet.wallet_snapshot))
             except Exception as exc:
                 snapshots.append({"wallet_id": wid, "error": str(exc)})
-        return web.json_response({"wallets": snapshots})
+        total = sum(float(item.get("wallet_value") or 0) for item in snapshots if "error" not in item)
+        return web.json_response({"wallet_value": total, "wallets": snapshots})
     try:
         wallet = broker.get_wallet(wallet_id)
         return web.json_response(await asyncio.to_thread(wallet.wallet_snapshot))

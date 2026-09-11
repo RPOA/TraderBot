@@ -14,6 +14,17 @@ class FakeWallet:
     def mid_price(self, coin):
         return 100.0
 
+    def wallet_snapshot(self):
+        return {
+            "wallet_id": "main",
+            "address": self.address,
+            "wallet_value": 1234.5,
+            "account_value": 1000.0,
+            "assets": [{"coin": "USDC", "size": 1000.0, "hold": 0.0, "mark_px": 1.0, "value": 1000.0}],
+            "positions": [],
+            "open_orders": [],
+        }
+
 
 class FakeBroker:
     def __init__(self):
@@ -121,6 +132,20 @@ class TradeApiTests(AioHTTPTestCase):
         body = await resp.json()
         assert body["success"] is True
         assert body["lines"][-1].endswith("queued")
+
+    async def test_wallet_includes_current_value(self):
+        resp = await self.client.get("/wallet")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["wallet_value"] == 1234.5
+        assert body["assets"][0]["coin"] == "USDC"
+
+    async def test_wallet_all_sums_values(self):
+        resp = await self.client.get("/wallet?wallet=all")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["wallet_value"] == 1234.5
+        assert body["wallets"][0]["wallet_value"] == 1234.5
 
     async def test_console_html(self):
         from src.logutil import memory_handler
